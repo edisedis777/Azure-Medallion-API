@@ -117,3 +117,6 @@ nohup uvicorn api:app --host 0.0.0.0 --port 80 &
 - ODBC Error: Install ODBC Driver 17 for SQL Server (sudo apt install -y msodbcsql17 on Ubuntu).
 - Secret Scope: Configure medallion-kv in Databricks with storage-account-name.
 - Key Vault: Ensure secrets (db-username, etc.) are set if using KEY_VAULT_URL.
+
+## License
+- MIT License - feel free to use, modify, and distribute!
