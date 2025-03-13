@@ -1,4 +1,5 @@
 pandas 
+pyspark
 pyarrow 
 fastapi 
 uvicorn 
