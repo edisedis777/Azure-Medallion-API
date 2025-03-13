@@ -1,0 +1,8 @@
+pandas 
+pyarrow 
+fastapi 
+uvicorn 
+sqlalchemy 
+pyodbc 
+azure-storage-blob 
+azure-identity
