@@ -3,6 +3,10 @@
 A data pipeline using the Medallion architecture (Bronze, Silver, Gold layers) on Microsoft Azure, with a RESTful API built using FastAPI to serve the processed data. 
 It ingests customer purchase data from a CSV file, processes it through multiple stages, and exposes it via an API.
 
+![image](https://github.com/user-attachments/assets/aa1b8f77-3821-4f05-9471-851a949e56a1)
+
+
+
 ## Project Structure
 - **Bronze Layer**: Raw data ingestion into Azure Data Lake Storage.
 - **Silver Layer**: Data cleaning and transformation using Azure Databricks.
