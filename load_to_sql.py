@@ -1,13 +1,15 @@
 # load_to_sql.py
 import os
 import tempfile
-import pandas as pd
+import pyarrow.parquet as pq
+import pyarrow as pa
 from sqlalchemy import create_engine, text
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential, AzureCliCredential, ManagedIdentityCredential
 from azure.core.exceptions import ClientAuthenticationError
 import logging
 from azure.keyvault.secrets import SecretClient
+import pyodbc
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -74,6 +76,110 @@ def create_db_views(engine):
             conn.commit()
     logging.info("Database views created successfully")
 
+def create_table_if_not_exists(engine, table_name, columns):
+    column_definitions = []
+    for col_name, col_type in columns:
+        column_definitions.append(f"{col_name} {col_type}")
+    
+    create_table_sql = f"""
+    IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{table_name}')
+    BEGIN
+        CREATE TABLE {table_name} (
+            {', '.join(column_definitions)}
+        )
+    END
+    """
+    
+    with engine.connect() as conn:
+        conn.execute(text(create_table_sql))
+        conn.commit()
+    logging.info(f"Ensured table {table_name} exists")
+
+def map_arrow_to_sql_type(arrow_type):
+    if pa.types.is_integer(arrow_type):
+        return "INT"
+    elif pa.types.is_floating(arrow_type):
+        return "FLOAT"
+    elif pa.types.is_string(arrow_type):
+        return "NVARCHAR(MAX)"
+    elif pa.types.is_boolean(arrow_type):
+        return "BIT"
+    elif pa.types.is_timestamp(arrow_type):
+        return "DATETIME2"
+    elif pa.types.is_date(arrow_type):
+        return "DATE"
+    else:
+        return "NVARCHAR(MAX)"
+
+def batch_insert_data(engine, connection_string, table_name, parquet_file, batch_size=10000):
+    # Read parquet schema
+    parquet_schema = pq.read_schema(parquet_file)
+    
+    # Map PyArrow schema to SQL types and create table if not exists
+    columns = [(field.name, map_arrow_to_sql_type(field.type)) for field in parquet_schema]
+    create_table_if_not_exists(engine, table_name, columns)
+    
+    # Create connection for fast bulk insert
+    conn = pyodbc.connect(connection_string.replace('mssql+pyodbc://', ''))
+    cursor = conn.cursor()
+    
+    # Read parquet file in batches
+    parquet_reader = pq.ParquetFile(parquet_file)
+    first_batch = True
+    
+    # Process each batch
+    for batch_number, batch in enumerate(parquet_reader.iter_batches(batch_size=batch_size)):
+        table = pa.Table.from_batches([batch])
+        
+        # Clear table on first batch
+        if first_batch:
+            cursor.execute(f"TRUNCATE TABLE {table_name}")
+            conn.commit()
+            first_batch = False
+        
+        # Prepare values for insertion
+        rows = []
+        for i in range(len(table)):
+            row = []
+            for j in range(len(table.column_names)):
+                if table[j][i].as_py() is None:
+                    row.append("NULL")
+                elif isinstance(table[j][i].as_py(), (int, float, bool)):
+                    row.append(str(table[j][i].as_py()))
+                else:
+                    # Escape single quotes in string values
+                    value = str(table[j][i].as_py()).replace("'", "''")
+                    row.append(f"'{value}'")
+            rows.append(f"({', '.join(row)})")
+        
+        # Insert batch
+        if rows:
+            batch_values = ', '.join(rows)
+            column_names = ', '.join(table.column_names)
+            insert_sql = f"INSERT INTO {table_name} ({column_names}) VALUES {batch_values}"
+            
+            # Execute in smaller chunks if needed
+            try:
+                cursor.execute(insert_sql)
+                conn.commit()
+                logging.info(f"Inserted batch {batch_number+1} ({len(rows)} records)")
+            except pyodbc.Error as e:
+                # If the batch is too large, we may need to split it
+                if "statement too long" in str(e).lower():
+                    # Split into smaller batches
+                    for i in range(0, len(rows), 1000):
+                        mini_batch = ', '.join(rows[i:i+1000])
+                        mini_insert_sql = f"INSERT INTO {table_name} ({column_names}) VALUES {mini_batch}"
+                        cursor.execute(mini_insert_sql)
+                        conn.commit()
+                    logging.info(f"Inserted batch {batch_number+1} in multiple chunks ({len(rows)} records total)")
+                else:
+                    logging.error(f"Error inserting batch: {str(e)}")
+                    raise
+    
+    cursor.close()
+    conn.close()
+
 def main():
     if not ACCOUNT_NAME:
         raise ValueError("STORAGE_ACCOUNT_NAME environment variable is not set")
@@ -96,10 +202,8 @@ def main():
         db_conn_string = get_db_connection_string()
         engine = create_engine(db_conn_string)
         
-        batch_size = 10000
-        for i, df_chunk in enumerate(pd.read_parquet(temp_path, chunksize=batch_size)):
-            df_chunk.to_sql("purchases", engine, if_exists="replace" if i == 0 else "append", index=False)
-            logging.info(f"Processed batch {i+1} ({len(df_chunk)} records)")
+        # Load data using PyArrow batches
+        batch_insert_data(engine, db_conn_string, "purchases", temp_path, batch_size=10000)
         
         create_db_views(engine)
         logging.info("Data loaded into Azure SQL Database")
